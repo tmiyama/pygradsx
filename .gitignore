@@ -1,0 +1,18 @@
+# Internal working notes (not part of the published package)
+PLAN.md
+REVIEW.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+
+# Local agent settings
+.claude/

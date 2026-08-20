@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pygradsx"
+version = "0.1.0"
+description = "Lazy xarray reader for GrADS ctl plus flat binary datasets"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "numpy",
+  "xarray",
+]
+authors = [
+  { name = "Toru Miyama" },
+]
+license = { text = "MIT" }
+keywords = ["grads", "xarray", "meteorology", "oceanography", "binary"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
+
+[project.urls]
+Homepage = "https://github.com/tmiyama/pygradsx"
+Issues = "https://github.com/tmiyama/pygradsx/issues"
+
+[project.optional-dependencies]
+test = ["pytest", "dask"]
+cftime = ["cftime"]
+
+[project.entry-points."xarray.backends"]
+pygradsx = "pygradsx.backend:PyGradsXBackendEntrypoint"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
