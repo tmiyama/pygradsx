@@ -172,6 +172,14 @@ def _basic_subset_shape(
     return tuple(shape)
 
 
+def _normalize_vector_indices(values: np.ndarray, size: int) -> np.ndarray:
+    values = np.asarray(values, dtype=np.int64)
+    values = np.where(values < 0, values + size, values)
+    if np.any((values < 0) | (values >= size)):
+        raise IndexError("vectorized index is out of bounds")
+    return values
+
+
 class GradsBackendArray(BackendArray):
     def __init__(
         self,
@@ -192,6 +200,11 @@ class GradsBackendArray(BackendArray):
         self.dtype = np.dtype("float32")
 
     def __getitem__(self, key):
+        # LazilyVectorizedIndexedArray sends a VectorizedIndexer directly to
+        # the backend. Handle it before the BASIC adapter so sparse (t,z,y,x)
+        # point requests can go straight to their byte locations.
+        if indexing is not None and isinstance(key, indexing.VectorizedIndexer):
+            return self._raw_vectorized_indexing_method(key.tuple)
         if indexing is not None and not isinstance(key, tuple):
             return indexing.explicit_indexing_adapter(
                 key,
@@ -200,6 +213,77 @@ class GradsBackendArray(BackendArray):
                 self._raw_indexing_method,
             )
         return self._raw_indexing_method(key)
+
+    def _raw_vectorized_indexing_method(self, key) -> np.ndarray:
+        if self.var.levs > 0:
+            if len(key) != 4:
+                raise IndexError("expected (time, lev, lat, lon) vectorized index")
+            t_raw, z_raw, y_raw, x_raw = key
+        else:
+            if len(key) != 3:
+                raise IndexError("expected (time, lat, lon) vectorized index")
+            t_raw, y_raw, x_raw = key
+            z_raw = np.asarray(0, dtype=np.int64)
+
+        arrays = np.broadcast_arrays(
+            np.asarray(t_raw), np.asarray(z_raw), np.asarray(y_raw), np.asarray(x_raw)
+        )
+        result_shape = arrays[0].shape
+        t_idx = _normalize_vector_indices(arrays[0], self.shape[0]).ravel()
+        z_idx = _normalize_vector_indices(arrays[1], self.var.planes).ravel()
+        y_idx = _normalize_vector_indices(arrays[2], self.desc.ny).ravel()
+        x_idx = _normalize_vector_indices(arrays[3], self.desc.nx).ravel()
+
+        # records are stored in file order. Translate logical z/y coordinates
+        # only when looking up the binary record/element.
+        stored_z = (
+            self.var.planes - 1 - z_idx
+            if "zrev" in self.desc.options
+            else z_idx
+        )
+        stored_y = (
+            self.desc.ny - 1 - y_idx
+            if "yrev" in self.desc.options
+            else y_idx
+        )
+
+        out = np.empty(t_idx.size, dtype="float32")
+        group_id = t_idx * self.var.planes + stored_z
+        for gid in np.unique(group_id):
+            positions = np.flatnonzero(group_id == gid)
+            ti = int(t_idx[positions[0]])
+            zi = int(stored_z[positions[0]])
+            record = self.records[ti][zi]
+            if record is None:
+                out[positions] = np.nan
+                continue
+
+            path, byte_offset = record
+            flat_index = stored_y[positions] * self.desc.nx + x_idx[positions]
+            if byte_offset % 4 == 0:
+                start = byte_offset // 4
+                mm = DEFAULT_CACHE.get(path, self.desc.dtype)
+                values = mm[start + flat_index]
+            else:
+                # Unaligned xyheader layouts are unusual. Preserve correctness
+                # with a full-record fallback while keeping the common aligned
+                # path sparse and zero-copy until the requested values are read.
+                with path.open("rb") as f:
+                    plane = np.fromfile(
+                        f,
+                        dtype=self.desc.dtype,
+                        count=self.desc.nx * self.desc.ny,
+                        offset=byte_offset,
+                    )
+                values = plane[flat_index]
+
+            values = np.asarray(values, dtype="float32")
+            if self.mask_and_scale:
+                values = np.array(values, dtype="float32", copy=True)
+                values[values == np.float32(self.desc.undef)] = np.nan
+            out[positions] = values
+
+        return out.reshape(result_shape)
 
     def _raw_indexing_method(self, key):
         key = _normalize_key(key, len(self.shape))
