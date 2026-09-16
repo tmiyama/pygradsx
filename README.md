@@ -56,6 +56,30 @@ ds = xr.open_dataset("model.ctl", engine="pygradsx", chunks={"time": 10})
 
 Coordinates are named `time`, `lev`, `lat`, `lon` with CF-style attributes.
 
+## Sparse point selection and dask
+
+Pointwise (vectorized) selection with `DataArray` indexers is read directly
+from the requested byte locations, without loading whole `lat` × `lon` planes:
+
+```python
+import xarray as xr
+
+ds = pygradsx.open_dataset("model.ctl")  # chunks=None (default)
+pts = ds.u.isel(
+    time=xr.DataArray(t_idx, dims="point"),
+    lev=xr.DataArray(z_idx, dims="point"),
+    lat=xr.DataArray(y_idx, dims="point"),
+    lon=xr.DataArray(x_idx, dims="point"),
+).values
+```
+
+This fast path only applies when the dataset is **not** dask-backed. With
+`chunks=` (including `chunks={}`), dask handles the vectorized indexing itself
+and reads every `lat` × `lon` plane that contains a requested point, which can
+be many times slower for sparse selections such as quiver plots or station
+extraction. For such workloads, open with the default `chunks=None`, and call
+`.chunk()` only after selecting the points if you still need dask.
+
 ## Supported GrADS features
 
 - `dset` (including `^` relative paths and filename templates such as
