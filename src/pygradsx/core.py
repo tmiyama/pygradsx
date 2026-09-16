@@ -155,6 +155,23 @@ def _indices(selector: object, size: int) -> Tuple[List[int], bool]:
     return [int(v) % size for v in arr.ravel()], False
 
 
+def _is_basic_selector(selector: object) -> bool:
+    return isinstance(selector, slice) or np.isscalar(selector)
+
+
+def _basic_subset_shape(
+    y_sel: object, x_sel: object, ny: int, nx: int
+) -> Tuple[int, ...]:
+    shape: List[int] = []
+    for selector, size in ((y_sel, ny), (x_sel, nx)):
+        if isinstance(selector, slice):
+            start, stop, step = selector.indices(size)
+            shape.append(len(range(start, stop, step)))
+        elif not np.isscalar(selector):
+            raise TypeError("selector is not basic")
+    return tuple(shape)
+
+
 class GradsBackendArray(BackendArray):
     def __init__(
         self,
@@ -196,13 +213,33 @@ class GradsBackendArray(BackendArray):
             z_idx, z_scalar = _indices(z_sel, self.var.planes)
         else:
             z_idx, z_scalar = [0], True
-        out = np.empty((len(t_idx), len(z_idx), self.desc.ny, self.desc.nx), dtype="float32")
-        for oi, ti in enumerate(t_idx):
-            for oj, zi in enumerate(z_idx):
-                out[oi, oj] = self._read_plane(ti, zi)
-        if "yrev" in self.desc.options:
-            out = out[..., ::-1, :]
-        out = out[(slice(None), slice(None), y_sel, x_sel)]
+
+        # xarray's BASIC adapter calls this method with scalar/slice selectors.
+        # Push those horizontal selectors into the plane reader so that dtype
+        # conversion and undef masking operate only on the requested subset.
+        # Keep the previous full-plane path for direct non-basic tuple access.
+        if _is_basic_selector(y_sel) and _is_basic_selector(x_sel):
+            subset_shape = _basic_subset_shape(
+                y_sel, x_sel, self.desc.ny, self.desc.nx
+            )
+            out = np.empty(
+                (len(t_idx), len(z_idx)) + subset_shape, dtype="float32"
+            )
+            for oi, ti in enumerate(t_idx):
+                for oj, zi in enumerate(z_idx):
+                    out[oi, oj] = self._read_plane(
+                        ti, zi, y_sel=y_sel, x_sel=x_sel
+                    )
+        else:
+            out = np.empty(
+                (len(t_idx), len(z_idx), self.desc.ny, self.desc.nx),
+                dtype="float32",
+            )
+            for oi, ti in enumerate(t_idx):
+                for oj, zi in enumerate(z_idx):
+                    out[oi, oj] = self._read_plane(ti, zi)
+            out = out[(slice(None), slice(None), y_sel, x_sel)]
+
         if self.var.levs == 0:
             out = out[:, 0, ...]
             if t_scalar:
@@ -216,27 +253,44 @@ class GradsBackendArray(BackendArray):
                 out = out[:, 0]
         return out
 
-    def _read_plane(self, time_index: int, z_index: int) -> np.ndarray:
+    def _read_plane(
+        self,
+        time_index: int,
+        z_index: int,
+        y_sel: object = slice(None),
+        x_sel: object = slice(None),
+    ) -> np.ndarray:
         if "zrev" in self.desc.options:
             z_index = self.var.planes - 1 - z_index
         record = self.records[time_index][z_index]
         if record is None:
-            return np.full((self.desc.ny, self.desc.nx), np.nan, dtype="float32")
+            shape = _basic_subset_shape(
+                y_sel, x_sel, self.desc.ny, self.desc.nx
+            )
+            return np.full(shape, np.nan, dtype="float32")
         path, byte_offset = record
         count = self.desc.nx * self.desc.ny
         if byte_offset % 4 == 0:
             start = byte_offset // 4
             mm = DEFAULT_CACHE.get(path, self.desc.dtype)
-            plane = np.asarray(mm[start : start + count]).reshape(self.desc.ny, self.desc.nx)
+            plane = np.asarray(mm[start : start + count]).reshape(
+                self.desc.ny, self.desc.nx
+            )
         else:
             with path.open("rb") as f:
                 plane = np.fromfile(
                     f, dtype=self.desc.dtype, count=count, offset=byte_offset
                 ).reshape(self.desc.ny, self.desc.nx)
-        if plane.dtype.byteorder not in ("=", "|"):
-            plane = plane.astype("float32", copy=False)
-        else:
-            plane = np.array(plane, dtype="float32", copy=False)
+
+        if "yrev" in self.desc.options:
+            plane = plane[::-1, :]
+        plane = plane[y_sel, x_sel]
+
+        # NumPy 2.x treats copy=False as a strict no-copy request. Scalar
+        # indexing can no longer satisfy np.array(..., copy=False), so use
+        # np.asarray here: it still avoids copies when possible but permits one
+        # when dtype/byte-order conversion or a 0-D result requires it.
+        plane = np.asarray(plane, dtype="float32")
         if self.mask_and_scale:
             plane = np.array(plane, dtype="float32", copy=True)
             plane[plane == np.float32(self.desc.undef)] = np.nan
