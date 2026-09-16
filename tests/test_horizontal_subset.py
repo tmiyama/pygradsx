@@ -84,5 +84,6 @@ def test_basic_horizontal_selectors_are_pushed_to_plane_reader(
 
     assert calls
     y_sel, x_sel = calls[-1]
-    assert y_sel == slice(1, 3)
-    assert x_sel == slice(2, 5)
+    # xarray normalizes an omitted slice step to 1 before calling the backend.
+    assert (y_sel.start, y_sel.stop, y_sel.step) == (1, 3, 1)
+    assert (x_sel.start, x_sel.stop, x_sel.step) == (2, 5, 1)
