@@ -286,10 +286,11 @@ class GradsBackendArray(BackendArray):
             plane = plane[::-1, :]
         plane = plane[y_sel, x_sel]
 
-        if plane.dtype.byteorder not in ("=", "|"):
-            plane = plane.astype("float32", copy=False)
-        else:
-            plane = np.array(plane, dtype="float32", copy=False)
+        # NumPy 2.x treats copy=False as a strict no-copy request. Scalar
+        # indexing can no longer satisfy np.array(..., copy=False), so use
+        # np.asarray here: it still avoids copies when possible but permits one
+        # when dtype/byte-order conversion or a 0-D result requires it.
+        plane = np.asarray(plane, dtype="float32")
         if self.mask_and_scale:
             plane = np.array(plane, dtype="float32", copy=True)
             plane[plane == np.float32(self.desc.undef)] = np.nan
